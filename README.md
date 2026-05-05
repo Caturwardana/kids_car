@@ -1,4 +1,4 @@
-#🚗 RC Car ESP32
+# 🚗 RC Car ESP32
 
 ## ✨ Fitur Utama
 
@@ -192,4 +192,14 @@ Versi 1 ini sudah:
 
 Sisanya tinggal lu upgrade sesuai ambisi 😎
 
+</details>
+
+<details>
+  <summary>CLICK to Expand -->🚗 RC Car ESP32 - Version 1</summary>
+## 🚀 Upgrade Versi 2
+
+* 🔋 Monitoring baterai (ADC)
+* 📱 WebSocket realtime control (lebih smooth)
+
+---
 </details>
