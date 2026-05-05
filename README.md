@@ -1,12 +1,11 @@
-# 🚗 RC Car ESP32 - Version 1
+#🚗 RC Car ESP32
+
+## ✨ Fitur Utama
 
 Remote control mobil anak berbasis **ESP32 + Web Control (WiFi AP)**.
 Kontrol dilakukan via browser (HP / laptop), jadi ga perlu remote fisik — tinggal connect WiFi, gas langsung 🚀
 
 ---
-
-## ✨ Fitur Utama
-
 * Kontrol **maju / mundur** (PWM smooth ramp)
 * Kontrol **belok kiri / kanan** (relay + MOSFET)
 * **Auto Center Steering** (opsional)
@@ -16,7 +15,9 @@ Kontrol dilakukan via browser (HP / laptop), jadi ga perlu remote fisik — ting
 * Non-blocking state machine (anti delay, anti ngelag)
 
 ---
-
+<details>
+  <summary>CLICK to Expand -->🚗 RC Car ESP32 - Version 1</summary>
+ 
 ## 📡 Mode Koneksi
 
 ESP32 membuat Access Point:
@@ -190,3 +191,5 @@ Versi 1 ini sudah:
 ✔ Aman dari steering overlimit
 
 Sisanya tinggal lu upgrade sesuai ambisi 😎
+
+</details>
