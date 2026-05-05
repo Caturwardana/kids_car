@@ -30,8 +30,8 @@ int potKiri, potKanan;
 float vbatCalib; 
 
 // Parameter Setting Manual 3-Zone
-int dzMan;     // Deadzone Roda saat mode manual
-int stirGap;   // Gap Toleransi Setir (%) antar 3 zona
+int dzMan;     
+int stirGap;   
 
 String currentDrive = "stop";
 String currentSteer = "lurus";
@@ -58,7 +58,7 @@ int activeSteerPWM = 0;
 // ===== VARIABEL FILTER & ZONA =====
 float smoothedRoda = 0;
 float smoothedStir = 0;
-int currentZone = 2; // Default mulai dari tengah (Zona 2)
+int currentZone = 2; 
 
 // ==========================================
 // ===== HALAMAN 1: MAIN MENU DASHBOARD =====
@@ -77,7 +77,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     .telemetry-box { background: #000; padding: 5px 10px; border-radius: 5px; border: 1px solid #333;}
     .container { display: flex; justify-content: space-around; padding: 40px 10px; align-items: center; height: 60vh; }
     .btn-circle { width: 90px; height: 90px; border-radius: 50%; font-size: 16px; font-weight: bold; background: #007bff; color: white; border: 4px solid #0056b3; box-shadow: 0 5px 0 #004494; touch-action: manipulation; }
-    .btn-circle:active { transform: translateY(5px); box-shadow: none; background: #0056b3; }
+    .btn-circle:active, .btn-circle[data-pressed="true"] { transform: translateY(5px); box-shadow: none; background: #0056b3; }
   </style>
 </head>
 <body>
@@ -103,12 +103,42 @@ const char index_html[] PROGMEM = R"rawliteral(
   </div>
 
   <script>
+    let pingTimer = null;
+
     function sendCmd(action) { fetch('/action?cmd=' + action); }
 
     function bindBtn(id, cmdPress, cmdRelease) {
       const btn = document.getElementById(id);
-      ['touchstart', 'mousedown'].forEach(evt => btn.addEventListener(evt, (e) => { e.preventDefault(); sendCmd(cmdPress); }));
-      ['touchend', 'mouseup'].forEach(evt => btn.addEventListener(evt, (e) => { e.preventDefault(); sendCmd(cmdRelease); }));
+
+      const press = (e) => {
+        e.preventDefault();
+        if(!btn.dataset.pressed) {
+          btn.dataset.pressed = "true";
+          sendCmd(cmdPress);
+          if(!pingTimer) pingTimer = setInterval(() => fetch('/ping'), 1000); // Heartbeat tiap 1 detik
+        }
+      };
+
+      const release = (e) => {
+        e.preventDefault();
+        if(btn.dataset.pressed) {
+          btn.dataset.pressed = "";
+          sendCmd(cmdRelease);
+          // Kalau ga ada tombol lain yang lagi dipencet, stop heartbeat
+          if(!document.querySelector('[data-pressed="true"]')) {
+             clearInterval(pingTimer);
+             pingTimer = null;
+          }
+        }
+      };
+
+      // Handle semua kemungkinan jari mencet atau kepeleset
+      btn.addEventListener('touchstart', press);
+      btn.addEventListener('mousedown', press);
+      btn.addEventListener('touchend', release);
+      btn.addEventListener('mouseup', release);
+      btn.addEventListener('mouseleave', release); // Kalo mouse geser keluar
+      btn.addEventListener('touchcancel', release); // Kalo layar error/ada notif masuk
     }
 
     bindBtn('btnMaju', 'maju', 'release_drive');
@@ -252,7 +282,6 @@ void setup() {
   potKanan      = preferences.getInt("pr", 4733);
   vbatCalib     = preferences.getFloat("vbc", 0.000937); 
   
-  // Load parameter Manual Mode
   stirGap       = preferences.getInt("zgp", 10);
   dzMan         = preferences.getInt("dzm", 250);
 
@@ -294,6 +323,12 @@ void setup() {
     server.send(200, "text/plain", "OK");
   });
 
+  // FUNGSI HEARTBEAT SAFETY
+  server.on("/ping", []() {
+    lastWebCmdTime = millis(); // Reset timer safety selama ping masuk
+    server.send(200, "text/plain", "OK");
+  });
+
   server.begin();
 }
 
@@ -304,16 +339,14 @@ void setup() {
 void steerTo(String arah, int pwm) {
   activeSteerPWM = pwm;
   
-  // Jika ARAH BARU beda dengan posisi relay terakhir
   if (pendingSteer != arah) {
-    if (steerPhase == 0) { // Pastikan state sebelumnya sudah selesai
+    if (steerPhase == 0) {
       pendingSteer = arah; 
       steerPhase = 1; 
       steerTimer = millis(); 
-      ledcWrite(1, 0); // Wajib matikan FET sebelum pindah relay
+      ledcWrite(1, 0);
     }
   } else {
-    // Jika ARAH SAMA (Relay sudah benar), LANGSUNG SIKAT FET tanpa delay!
     if (steerPhase == 0) {
       ledcWrite(1, activeSteerPWM);
     }
@@ -321,9 +354,9 @@ void steerTo(String arah, int pwm) {
 }
 
 void stopSteer() {
-  ledcWrite(1, 0); // HANYA MATIKAN FET! Biarkan relay tetap di posisinya.
-  currentSteer = "lurus"; // Tandai bahwa roda sedang tidak bermanuver aktif
-  steerPhase = 0; // Reset state machine agar siap menerima perintah FET instan
+  ledcWrite(1, 0); 
+  currentSteer = "lurus"; 
+  steerPhase = 0; 
 }
 
 
@@ -345,13 +378,16 @@ void loop() {
   
   bool pedalFwd = (digitalRead(INPUT_FORWARD) == LOW);
   bool pedalBwd = (digitalRead(INPUT_BACKWARD) == LOW);
-  bool webOverride = (millis() - lastWebCmdTime < 2000); 
+  
+  // Timer Safety sekarang dipandu oleh update dari /action ATAU /ping
+  bool webOverride = (millis() - lastWebCmdTime < 3000); 
 
-  if (millis() - lastWebCmdTime > 3000) {
+  // TIMEOUT SAFETY AKTIF (Jika webOverride false / udah > 3 detik ga dapet kabar)
+  if (!webOverride) {
     if (currentDrive != "stop" && !pedalFwd && !pedalBwd) stopDrive();
   }
 
-  // LIMIT CHECK AMAN (Hanya matikan motor saat bablas)
+  // LIMIT CHECK AMAN
   if (millis() - lastLimitCheck >= 30) {
     lastLimitCheck = millis();
     if (currentSteer != "lurus" && currentSteer != "centering") {
@@ -380,8 +416,6 @@ void loop() {
     int persenStir = map(adcStir, potKiri, potKanan, 0, 100);
     persenStir = constrain(persenStir, 0, 100);
 
-    // Saklar dengan Schmitt Trigger / Hysteresis
-    // stirGap berfungsi murni sebagai Deadzone perbatasan.
     if (persenStir < (33 - stirGap)) {
       currentZone = 1; // KIRI
     } else if (persenStir > (33 + stirGap) && persenStir < (66 - stirGap)) {
@@ -389,8 +423,6 @@ void loop() {
     } else if (persenStir > (66 + stirGap)) {
       currentZone = 3; // KANAN
     }
-    // CATATAN: Jika 'persenStir' jatuh di celah batas (misal getar tangan), 
-    // currentZone TETAP menahan nilai terakhirnya (Jitter input terblokir di sini!)
     
     int targetADC = adcTengah;
     if (currentZone == 1) targetADC = limitKiri;
@@ -402,14 +434,14 @@ void loop() {
     // Eksekusi Roda Mengejar Target
     if (errorRoda > dzMan) {
       String arahManual = (adcRoda < targetADC) ? "kanan" : "kiri";
-      currentSteer = "manual"; // Tandai mobil sedang bermanuver manual
+      currentSteer = "manual"; 
       steerTo(arahManual, belokPWM);
     } else {
       if (currentSteer != "lurus") stopSteer();
     }
   }
 
-  // 5. AUTO CENTER LOGIC (Untuk Web)
+  // 5. AUTO CENTER LOGIC
   if (currentSteer == "centering" && (manualMode == 0 || webOverride)) {
     int errorCenter = abs(adcRoda - adcTengah);
     if (errorCenter <= deadzone) { 
@@ -424,14 +456,14 @@ void loop() {
     }
   }
 
-  // 6. STEER STATE MACHINE (Hanya bekerja saat relay perlu ganti arah)
+  // 6. STEER STATE MACHINE
   if (steerPhase == 1 && millis() - steerTimer >= 50) {
     digitalWrite(RELAY_STEER, (pendingSteer == "kanan") ? HIGH : LOW);
     steerPhase = 2; steerTimer = millis();
   }
   else if (steerPhase == 2 && millis() - steerTimer >= 50) {
-    ledcWrite(1, activeSteerPWM); // Relay sudah siap, nyalakan motor!
-    steerPhase = 0; // State machine selesai tugasnya
+    ledcWrite(1, activeSteerPWM);
+    steerPhase = 0; 
   }
 
   // 7. DRIVE STATE MACHINE
@@ -510,8 +542,13 @@ void handleAction() {
     String cmd = server.arg("cmd");
     lastWebCmdTime = millis(); 
     
-    if (cmd == "maju") { stopDrive(); pendingDrive = "maju"; drivePhase = (currentDrive == "mundur") ? 1 : 0; if(drivePhase==0) executeMaju(); else driveTimer=millis(); }
-    else if (cmd == "mundur") { stopDrive(); pendingDrive = "mundur"; drivePhase = (currentDrive == "maju") ? 1 : 0; if(drivePhase==0) executeMundur(); else driveTimer=millis(); }
+    // Ditambahkan perlindungan ekstra biar nggak restart accelTime kalo tombol dipencet berulang kali
+    if (cmd == "maju") { 
+      if (pendingDrive != "maju") { stopDrive(); pendingDrive = "maju"; drivePhase = (currentDrive == "mundur") ? 1 : 0; if(drivePhase==0) executeMaju(); else driveTimer=millis(); }
+    }
+    else if (cmd == "mundur") { 
+      if (pendingDrive != "mundur") { stopDrive(); pendingDrive = "mundur"; drivePhase = (currentDrive == "maju") ? 1 : 0; if(drivePhase==0) executeMundur(); else driveTimer=millis(); }
+    }
     else if (cmd == "release_drive") stopDrive();
     
     else if (cmd == "kiri") { 
@@ -531,7 +568,7 @@ void handleAction() {
 void stopDrive() {
   ledcWrite(0, 0); ledcWrite(2, 0);
   digitalWrite(R_EN_PIN, LOW); digitalWrite(L_EN_PIN, LOW);
-  if (drivePhase != 1) currentDrive = "stop";
+  if (drivePhase != 1) { currentDrive = "stop"; pendingDrive = ""; }
 }
 
 void executeMaju() {
