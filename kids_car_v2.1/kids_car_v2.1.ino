@@ -23,11 +23,15 @@ int speedPWM, belokPWM;
 int limitKiri, limitKanan;    
 int startDrivePWM; 
 int adcTengah, deadzone;
-int autoCenter; // 1 = Enable, 0 = Disable
-int accelTime;  // Waktu akselerasi (ms)
-int manualMode; // 1 = Enable, 0 = Disable
-int potKiri, potKanan; // Kalibrasi stir manual
-float vbatCalib; // Multiplier tegangan
+int autoCenter; 
+int accelTime;  
+int manualMode; 
+int potKiri, potKanan; 
+float vbatCalib; 
+
+// Parameter Setting Manual 3-Zone
+int dzMan;     // Deadzone Roda saat mode manual
+int stirGap;   // Gap Toleransi Setir (%) antar 3 zona
 
 String currentDrive = "stop";
 String currentSteer = "lurus";
@@ -38,7 +42,7 @@ Preferences preferences;
 
 // ===== VARIABEL TIMING & NON-BLOCKING =====
 unsigned long lastLimitCheck = 0;
-unsigned long lastWebCmdTime = 0; // Untuk failsafe & override
+unsigned long lastWebCmdTime = 0; 
 
 int drivePhase = 0; 
 unsigned long driveTimer = 0;
@@ -48,11 +52,13 @@ int activeDriveChannel = 0;
 
 int steerPhase = 0; 
 unsigned long steerTimer = 0;
-String pendingSteer = "";
+String pendingSteer = "lurus";
+int activeSteerPWM = 0;
 
-// ===== VARIABEL FILTER ANTI-JITTER =====
-float smoothedStir = 0;
+// ===== VARIABEL FILTER & ZONA =====
 float smoothedRoda = 0;
+float smoothedStir = 0;
+int currentZone = 2; // Default mulai dari tengah (Zona 2)
 
 // ==========================================
 // ===== HALAMAN 1: MAIN MENU DASHBOARD =====
@@ -140,7 +146,7 @@ const char settings_html[] PROGMEM = R"rawliteral(
     .btn-small { background: #666; color: white; border: none; padding: 5px; border-radius: 3px; cursor: pointer; font-size: 10px; width: 100%; margin-top: 5px;}
     .btn-save { width: 100%; padding: 15px; background: #28a745; color: white; border: none; border-radius: 8px; font-weight: bold; font-size: 16px; margin-bottom: 10px;}
     .btn-back { display: block; margin-bottom: 20px; color: #ffcc00; text-decoration: none; font-weight: bold; text-align: left; }
-    .section-title { color: #00bfff; font-size: 14px; border-bottom: 1px solid #444; padding-bottom: 5px; margin-bottom: 10px; text-align: left;}
+    .section-title { color: #00bfff; font-size: 14px; border-bottom: 1px solid #444; padding-bottom: 5px; margin-bottom: 10px; text-align: left; margin-top:20px;}
   </style>
 </head>
 <body>
@@ -149,12 +155,12 @@ const char settings_html[] PROGMEM = R"rawliteral(
     <h3 style="color: #ffcc00; border-bottom: 1px solid #444; padding-bottom: 10px;">⚙️ TUNING PARAMETER</h3>
     <p style="font-size: 12px; color: #ccc;">Roda ADC: <b id="liveADC" style="color:#0f0;">0</b> | Setir ADC: <b id="livePot" style="color:#0f0;">0</b></p>
     
-    <div class="section-title">Drive & Steer Motor</div>
+    <div class="section-title">Drive & Auto Steer</div>
     <div class="grid">
       <div><label>Limit Kiri</label><input type="number" id="valLK"><button class="btn-small" onclick="getADC('valLK', 1)">GET ADC KIRI</button></div>
       <div><label>Limit Kanan</label><input type="number" id="valRK"><button class="btn-small" onclick="getADC('valRK', 1)">GET ADC KANAN</button></div>
       <div><label>Center Lurus</label><input type="number" id="valMid"><button class="btn-small" onclick="getADC('valMid', 1)">GET ADC TENGAH</button></div>
-      <div><label>Deadzone ADC</label><input type="number" id="valDz"></div>
+      <div><label>Deadzone Web</label><input type="number" id="valDz"></div>
       <div><label>Gas Max (PWM)</label><input type="number" id="valSpeed"></div>
       <div><label>Hentakan Awal</label><input type="number" id="valStart"></div>
       <div><label>Tenaga Belok Max</label><input type="number" id="valBelok"></div>
@@ -164,7 +170,7 @@ const char settings_html[] PROGMEM = R"rawliteral(
       <div style="grid-column: span 2;"><label>Waktu Akselerasi (ms)</label><input type="number" id="valAccel"></div>
     </div>
 
-    <div class="section-title">Manual Control (Pedal & Setir)</div>
+    <div class="section-title" style="color: #ff6666;">Manual Control (3-Zone)</div>
     <div class="grid">
       <div><label>Mode Manual</label>
         <select id="valMan"><option value="1">Aktif</option><option value="0">Mati</option></select>
@@ -172,6 +178,12 @@ const char settings_html[] PROGMEM = R"rawliteral(
       <div></div>
       <div><label>Stir Kiri Max</label><input type="number" id="valPK"><button class="btn-small" onclick="getADC('valPK', 0)">GET STIR KIRI</button></div>
       <div><label>Stir Kanan Max</label><input type="number" id="valPR"><button class="btn-small" onclick="getADC('valPR', 0)">GET STIR KANAN</button></div>
+      
+      <div style="grid-column: span 2; border-top: 1px dashed #555; margin-top: 5px; padding-top: 10px;">
+        <i style="font-size:11px; color:#aaa;">Khusus tuning setir manual (Kiri - Tengah - Kanan)</i>
+      </div>
+      <div><label>Gap Setir (%)</label><input type="number" id="valZgp" placeholder="10"></div>
+      <div><label>Deadzone Roda</label><input type="number" id="valDzM" placeholder="250"></div>
     </div>
 
     <div class="section-title">Kalibrasi Baterai (3S Li-ion)</div>
@@ -194,22 +206,18 @@ const char settings_html[] PROGMEM = R"rawliteral(
     }, 800);
 
     fetch('/get_params').then(res => res.json()).then(data => {
-      document.getElementById('valLK').value = data.lk;
-      document.getElementById('valRK').value = data.rk;
-      document.getElementById('valMid').value = data.mid;
-      document.getElementById('valDz').value = data.dz;
-      document.getElementById('valSpeed').value = data.spm;
-      document.getElementById('valStart').value = data.sta;
-      document.getElementById('valBelok').value = data.bel;
-      document.getElementById('valAuto').value = data.ac;
-      document.getElementById('valAccel').value = data.acc;
-      document.getElementById('valMan').value = data.man;
-      document.getElementById('valPK').value = data.pk;
-      document.getElementById('valPR').value = data.pr;
+      document.getElementById('valLK').value = data.lk; document.getElementById('valRK').value = data.rk;
+      document.getElementById('valMid').value = data.mid; document.getElementById('valDz').value = data.dz;
+      document.getElementById('valSpeed').value = data.spm; document.getElementById('valStart').value = data.sta;
+      document.getElementById('valBelok').value = data.bel; document.getElementById('valAuto').value = data.ac;
+      document.getElementById('valAccel').value = data.acc; document.getElementById('valMan').value = data.man;
+      document.getElementById('valPK').value = data.pk; document.getElementById('valPR').value = data.pr;
+      
+      document.getElementById('valZgp').value = data.zgp; document.getElementById('valDzM').value = data.dzm;
     });
 
     function saveParams() {
-      let q = `lk=${document.getElementById('valLK').value}&rk=${document.getElementById('valRK').value}&mid=${document.getElementById('valMid').value}&dz=${document.getElementById('valDz').value}&spm=${document.getElementById('valSpeed').value}&sta=${document.getElementById('valStart').value}&bel=${document.getElementById('valBelok').value}&ac=${document.getElementById('valAuto').value}&acc=${document.getElementById('valAccel').value}&man=${document.getElementById('valMan').value}&pk=${document.getElementById('valPK').value}&pr=${document.getElementById('valPR').value}`;
+      let q = `lk=${document.getElementById('valLK').value}&rk=${document.getElementById('valRK').value}&mid=${document.getElementById('valMid').value}&dz=${document.getElementById('valDz').value}&spm=${document.getElementById('valSpeed').value}&sta=${document.getElementById('valStart').value}&bel=${document.getElementById('valBelok').value}&ac=${document.getElementById('valAuto').value}&acc=${document.getElementById('valAccel').value}&man=${document.getElementById('valMan').value}&pk=${document.getElementById('valPK').value}&pr=${document.getElementById('valPR').value}&zgp=${document.getElementById('valZgp').value}&dzm=${document.getElementById('valDzM').value}`;
       fetch('/set_params?' + q).then(() => alert('Setting Tersimpan!'));
     }
 
@@ -226,11 +234,9 @@ const char settings_html[] PROGMEM = R"rawliteral(
 void setup() {
   Serial.begin(115200);
 
-  // Setup Pin Manual
   pinMode(INPUT_FORWARD, INPUT_PULLUP);
   pinMode(INPUT_BACKWARD, INPUT_PULLUP);
 
-  // Load Parameters NVS (Dengan Default Baru)
   preferences.begin("rc-config", false);
   limitKiri     = preferences.getInt("lk", 3600);
   limitKanan    = preferences.getInt("rk", 8400);
@@ -240,11 +246,15 @@ void setup() {
   startDrivePWM = preferences.getInt("sta", 5);
   belokPWM      = preferences.getInt("bel", 150);
   autoCenter    = preferences.getInt("ac", 1); 
-  accelTime     = preferences.getInt("acc", 1500); // Default 1.5 detik
+  accelTime     = preferences.getInt("acc", 1500); 
   manualMode    = preferences.getInt("man", 0);
   potKiri       = preferences.getInt("pk", 12385);
   potKanan      = preferences.getInt("pr", 4733);
   vbatCalib     = preferences.getFloat("vbc", 0.000937); 
+  
+  // Load parameter Manual Mode
+  stirGap       = preferences.getInt("zgp", 10);
+  dzMan         = preferences.getInt("dzm", 250);
 
   pinMode(R_EN_PIN, OUTPUT); pinMode(L_EN_PIN, OUTPUT);
   digitalWrite(R_EN_PIN, LOW); digitalWrite(L_EN_PIN, LOW);
@@ -271,7 +281,7 @@ void setup() {
     int ch = server.hasArg("ch") ? server.arg("ch").toInt() : 1;
     server.send(200, "text/plain", String(ads.readADC_SingleEnded(ch))); 
   });
-  
+
   server.on("/cal_vbat", []() {
     if (server.hasArg("v")) {
       float actualV = server.arg("v").toFloat();
@@ -287,14 +297,40 @@ void setup() {
   server.begin();
 }
 
-// ===== LOOP =====
-// Tambahkan variabel ini di atas void setup() kalau belum ada:
-// int lastTargetADC = 0; 
+// ==========================================
+// ===== FUNGSI SENTRAL ANTI-JITTER RELAY ===
+// ==========================================
 
+void steerTo(String arah, int pwm) {
+  activeSteerPWM = pwm;
+  
+  // Jika ARAH BARU beda dengan posisi relay terakhir
+  if (pendingSteer != arah) {
+    if (steerPhase == 0) { // Pastikan state sebelumnya sudah selesai
+      pendingSteer = arah; 
+      steerPhase = 1; 
+      steerTimer = millis(); 
+      ledcWrite(1, 0); // Wajib matikan FET sebelum pindah relay
+    }
+  } else {
+    // Jika ARAH SAMA (Relay sudah benar), LANGSUNG SIKAT FET tanpa delay!
+    if (steerPhase == 0) {
+      ledcWrite(1, activeSteerPWM);
+    }
+  }
+}
+
+void stopSteer() {
+  ledcWrite(1, 0); // HANYA MATIKAN FET! Biarkan relay tetap di posisinya.
+  currentSteer = "lurus"; // Tandai bahwa roda sedang tidak bermanuver aktif
+  steerPhase = 0; // Reset state machine agar siap menerima perintah FET instan
+}
+
+
+// ===== LOOP =====
 void loop() {
   server.handleClient();
   
-  // 1. BACA & FILTER ADC (EMA)
   int16_t rawAdcRoda = ads.readADC_SingleEnded(1);
   int16_t rawAdcStir = ads.readADC_SingleEnded(0);
 
@@ -311,24 +347,24 @@ void loop() {
   bool pedalBwd = (digitalRead(INPUT_BACKWARD) == LOW);
   bool webOverride = (millis() - lastWebCmdTime < 2000); 
 
-  // 2. FAILSAFE CHECK (3 Detik No Command)
   if (millis() - lastWebCmdTime > 3000) {
     if (currentDrive != "stop" && !pedalFwd && !pedalBwd) stopDrive();
   }
 
-  // 3. LIMIT CHECK (Emergency Stop)
+  // LIMIT CHECK AMAN (Hanya matikan motor saat bablas)
   if (millis() - lastLimitCheck >= 30) {
     lastLimitCheck = millis();
-    if (currentSteer != "centering") {
-      if ((currentSteer == "kiri" || pendingSteer == "kiri") && adcRoda <= limitKiri) lurus();
-      else if ((currentSteer == "kanan" || pendingSteer == "kanan") && adcRoda >= limitKanan) lurus();
+    if (currentSteer != "lurus" && currentSteer != "centering") {
+      if (pendingSteer == "kiri" && adcRoda <= limitKiri) stopSteer();
+      else if (pendingSteer == "kanan" && adcRoda >= limitKanan) stopSteer();
     }
   }
 
-  // 4. MANUAL CONTROL LOGIC
-  static int lastTargetADC = adcTengah; // Mengunci target agar tidak ikut getar
-
+  // ====================================================
+  // ===== 4. MANUAL CONTROL: LOGIKA 3 ZONE STEER =====
+  // ====================================================
   if (manualMode == 1 && !webOverride) {
+    
     // ---- MANUAL DRIVE ----
     if (pedalFwd && !pedalBwd && pendingDrive != "maju") {
        stopDrive(); pendingDrive = "maju"; drivePhase = (currentDrive == "mundur") ? 1 : 0;
@@ -340,77 +376,62 @@ void loop() {
        stopDrive();
     }
 
-    // ---- MANUAL STEER DENGAN P-CONTROLLER & DEADBAND ----
-    int rawTargetADC = map(adcStir, potKiri, potKanan, limitKiri, limitKanan);
-    rawTargetADC = constrain(rawTargetADC, min(limitKiri, limitKanan), max(limitKiri, limitKanan));
+    // ---- MANUAL STEER (Logika Saklar 3-Kaki + Gap) ----
+    int persenStir = map(adcStir, potKiri, potKanan, 0, 100);
+    persenStir = constrain(persenStir, 0, 100);
 
-    // Target Deadband: Kalau setir cuma geser dikit (< 30), abaikan (anggap tangan cuma getar)
-    if (abs(rawTargetADC - lastTargetADC) > 30) {
-      lastTargetADC = rawTargetADC;
+    // Saklar dengan Schmitt Trigger / Hysteresis
+    // stirGap berfungsi murni sebagai Deadzone perbatasan.
+    if (persenStir < (33 - stirGap)) {
+      currentZone = 1; // KIRI
+    } else if (persenStir > (33 + stirGap) && persenStir < (66 - stirGap)) {
+      currentZone = 2; // TENGAH
+    } else if (persenStir > (66 + stirGap)) {
+      currentZone = 3; // KANAN
     }
+    // CATATAN: Jika 'persenStir' jatuh di celah batas (misal getar tangan), 
+    // currentZone TETAP menahan nilai terakhirnya (Jitter input terblokir di sini!)
     
-    int errorRoda = abs(adcRoda - lastTargetADC);
+    int targetADC = adcTengah;
+    if (currentZone == 1) targetADC = limitKiri;
+    else if (currentZone == 2) targetADC = adcTengah;
+    else if (currentZone == 3) targetADC = limitKanan;
 
-    // Eksekusi belok
-    if (errorRoda > deadzone) {
-      String arahManual = (adcRoda < lastTargetADC) ? "kanan" : "kiri";
-      
-      // -- PROPORTIONAL CONTROL (PENGEREMAN) --
-      int pwmAktif = belokPWM;
-      int slowZone = 400; // Jarak ADC mulai melakukan pengereman
-      int minPWM = 40;    // Tenaga minimum agar motor tetap kuat muter pelan
-      
-      if (errorRoda <= slowZone) {
-        // Semakin dekat, PWM turun perlahan dari belokPWM ke minPWM
-        pwmAktif = map(errorRoda, deadzone, slowZone, minPWM, belokPWM);
-      }
+    int errorRoda = abs(adcRoda - targetADC);
 
-      if (pendingSteer != arahManual && steerPhase == 0) {
-        pendingSteer = arahManual; steerPhase = 1; steerTimer = millis(); ledcWrite(1, 0);
-      } else if (steerPhase == 0) {
-        ledcWrite(1, pwmAktif);
-      }
+    // Eksekusi Roda Mengejar Target
+    if (errorRoda > dzMan) {
+      String arahManual = (adcRoda < targetADC) ? "kanan" : "kiri";
+      currentSteer = "manual"; // Tandai mobil sedang bermanuver manual
+      steerTo(arahManual, belokPWM);
     } else {
-      if (steerPhase == 0 && currentSteer != "lurus") lurus();
+      if (currentSteer != "lurus") stopSteer();
     }
   }
 
-  // 5. AUTO CENTER LOGIC DENGAN P-CONTROLLER
+  // 5. AUTO CENTER LOGIC (Untuk Web)
   if (currentSteer == "centering" && (manualMode == 0 || webOverride)) {
     int errorCenter = abs(adcRoda - adcTengah);
-    
-    if (errorCenter <= deadzone) { lurus(); } 
-    else {
+    if (errorCenter <= deadzone) { 
+      stopSteer(); 
+    } else {
       String arahBalik = (adcRoda < adcTengah) ? "kanan" : "kiri";
-      
-      // -- PROPORTIONAL CONTROL AUTO CENTER --
       int pwmBalik = belokPWM;
-      int slowZone = 500; 
-      int minPWM = startDrivePWM;
-      
-      if (errorCenter <= slowZone) {
-        pwmBalik = map(errorCenter, deadzone, slowZone, minPWM, belokPWM);
+      if (errorCenter <= 500) {
+        pwmBalik = map(errorCenter, deadzone, 500, startDrivePWM, belokPWM);
       }
-
-      if (pendingSteer != arahBalik && steerPhase == 0) {
-        pendingSteer = arahBalik; steerPhase = 1; steerTimer = millis(); ledcWrite(1, 0);
-      } else if (steerPhase == 0) {
-        ledcWrite(1, pwmBalik);
-      }
+      steerTo(arahBalik, pwmBalik);
     }
   }
 
-  // 6. STEER STATE MACHINE
+  // 6. STEER STATE MACHINE (Hanya bekerja saat relay perlu ganti arah)
   if (steerPhase == 1 && millis() - steerTimer >= 50) {
     digitalWrite(RELAY_STEER, (pendingSteer == "kanan") ? HIGH : LOW);
     steerPhase = 2; steerTimer = millis();
   }
   else if (steerPhase == 2 && millis() - steerTimer >= 50) {
-    if (currentSteer != "centering" && !(manualMode == 1 && !webOverride)) {
-      ledcWrite(1, belokPWM);
-      currentSteer = pendingSteer; 
-    }
-    steerPhase = 0;
+    ledcWrite(1, activeSteerPWM); // Relay sudah siap, nyalakan motor!
+    steerPhase = 0; // State machine selesai tugasnya
   }
 
   // 7. DRIVE STATE MACHINE
@@ -433,7 +454,7 @@ void loop() {
 // ===== HANDLERS =====
 void handleTelemetry() {
   float vbat = ads.readADC_SingleEnded(2) * vbatCalib;
-  int16_t adcRoda = (int16_t)smoothedRoda; // Kirim data yang udah halus ke dashboard
+  int16_t adcRoda = (int16_t)smoothedRoda; 
   int16_t adcStir = (int16_t)smoothedStir; 
   
   String json = "{";
@@ -451,7 +472,8 @@ void handleGetParams() {
   json += "\"spm\":" + String(speedPWM) + ",\"sta\":" + String(startDrivePWM) + ",";
   json += "\"bel\":" + String(belokPWM) + ",\"ac\":" + String(autoCenter) + ",";
   json += "\"acc\":" + String(accelTime) + ",\"man\":" + String(manualMode) + ",";
-  json += "\"pk\":" + String(potKiri) + ",\"pr\":" + String(potKanan);
+  json += "\"pk\":" + String(potKiri) + ",\"pr\":" + String(potKanan) + ",";
+  json += "\"zgp\":" + String(stirGap) + ",\"dzm\":" + String(dzMan);
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -469,6 +491,8 @@ void handleSetParams() {
   if (server.hasArg("man")) manualMode = server.arg("man").toInt();
   if (server.hasArg("pk"))  potKiri = server.arg("pk").toInt();
   if (server.hasArg("pr"))  potKanan = server.arg("pr").toInt();
+  if (server.hasArg("zgp")) stirGap = server.arg("zgp").toInt();
+  if (server.hasArg("dzm")) dzMan   = server.arg("dzm").toInt();
 
   preferences.putInt("lk", limitKiri); preferences.putInt("rk", limitKanan);
   preferences.putInt("mid", adcTengah); preferences.putInt("dz", deadzone);
@@ -476,6 +500,7 @@ void handleSetParams() {
   preferences.putInt("bel", belokPWM); preferences.putInt("ac", autoCenter);
   preferences.putInt("acc", accelTime); preferences.putInt("man", manualMode);
   preferences.putInt("pk", potKiri); preferences.putInt("pr", potKanan);
+  preferences.putInt("zgp", stirGap); preferences.putInt("dzm", dzMan);
 
   server.send(200, "text/plain", "OK");
 }
@@ -489,12 +514,15 @@ void handleAction() {
     else if (cmd == "mundur") { stopDrive(); pendingDrive = "mundur"; drivePhase = (currentDrive == "maju") ? 1 : 0; if(drivePhase==0) executeMundur(); else driveTimer=millis(); }
     else if (cmd == "release_drive") stopDrive();
     
-    // Steering Commands menggunakan nilai ADC yang difilter
-    else if (cmd == "kiri") { if(smoothedRoda > limitKiri) { currentSteer = "manual"; pendingSteer = "kiri"; steerPhase = 1; steerTimer = millis(); ledcWrite(1, 0); } }
-    else if (cmd == "kanan") { if(smoothedRoda < limitKanan) { currentSteer = "manual"; pendingSteer = "kanan"; steerPhase = 1; steerTimer = millis(); ledcWrite(1, 0); } }
+    else if (cmd == "kiri") { 
+      if(smoothedRoda > limitKiri) { currentSteer = "manual"; steerTo("kiri", belokPWM); } 
+    }
+    else if (cmd == "kanan") { 
+      if(smoothedRoda < limitKanan) { currentSteer = "manual"; steerTo("kanan", belokPWM); } 
+    }
     else if (cmd == "release_steer") {
       if (autoCenter == 1) currentSteer = "centering"; 
-      else lurus(); 
+      else stopSteer(); 
     }
   }
   server.send(200, "text/plain", "OK");
@@ -522,5 +550,4 @@ void executeMundur() {
   drivePhase = 2; driveTimer = millis();
 }
 
-void lurus() { steerPhase = 0; currentSteer = "lurus"; pendingSteer = "lurus"; ledcWrite(1, 0); }
-void stopAll() { stopDrive(); lurus(); }
+void stopAll() { stopDrive(); stopSteer(); }
