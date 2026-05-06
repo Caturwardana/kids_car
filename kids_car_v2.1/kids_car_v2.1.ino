@@ -485,6 +485,8 @@ void loop() {
 
 // ===== HANDLERS =====
 void handleTelemetry() {
+  lastWebCmdTime = millis(); // <--- TAMBAHIN BARIS INI untuk remote tetap check remote terhubung
+  
   float vbat = ads.readADC_SingleEnded(2) * vbatCalib;
   int16_t adcRoda = (int16_t)smoothedRoda; 
   int16_t adcStir = (int16_t)smoothedStir; 
