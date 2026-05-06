@@ -196,6 +196,7 @@ Sisanya tinggal lu upgrade sesuai ambisi 😎
 
 <details>
   <summary>CLICK to Expand -->🚗 RC Car ESP32 - Version 1</summary>
+
 ## 🚀 Upgrade Versi 2
 
 * 🔋 Monitoring baterai (ADC)
@@ -330,8 +331,12 @@ Mengambil data sensor secara *real-time*.
 *   **Kalibrasi Baterai:** `/cal_vbat?v=12.5` (Masukkan angka tegangan asli dari multitester untuk mengkalibrasi faktor pembagi).
 
 ---
+</details>
 
-### 💻 3. Contoh Implementasi untuk "ESP32 Remote Controller"
+<details>
+  <summary>CLICK to Expand -->🎮 Remote Version 1</summary>
+
+# Remote V1 Contoh Implementasi untuk "ESP32 Remote Controller"
 
 Kalau lo bikin remote pakai ESP32 lain, begini logika dasar code di ESP32 Remote-nya pakai library `HTTPClient`.
 ```cpp
