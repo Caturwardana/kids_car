@@ -195,7 +195,7 @@ Sisanya tinggal lu upgrade sesuai ambisi 😎
 </details>
 
 <details>
-  <summary>CLICK to Expand -->🚗 RC Car ESP32 - Version 1</summary>
+  <summary>CLICK to Expand -->🚗 RC Car ESP32 - Version 2.1</summary>
 
 ## 🚀 Upgrade Versi 2
 
