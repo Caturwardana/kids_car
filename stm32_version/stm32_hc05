@@ -1,0 +1,467 @@
+#include <EEPROM.h>
+
+// ===== PIN MAPPING STM32 =====
+// 1. DRIVE BTS7960
+#define RPWM_DRIVE PA1  // Maju
+#define LPWM_DRIVE PA0  // Mundur
+#define R_EN_DRIVE PA3
+#define L_EN_DRIVE PA2
+
+// 2. STEERING BTS7960
+#define RPWM_STEER PB0  // Belok Kanan
+#define LPWM_STEER PB1  // Belok Kiri
+#define R_EN_STEER PB10
+#define L_EN_STEER PB11
+
+// 3. MANUAL CONTROL (PEDAL)
+#define INPUT_FORWARD  PB13
+#define INPUT_BACKWARD PB14
+
+// 4. ADC INTERNAL STM32 PENGGANTI ADS1115
+#define ADC_STIR PA4  // Ganti dari ads.readADC(0)
+#define ADC_RODA PA5  // Ganti dari ads.readADC(1)
+#define ADC_VBAT PA6  // Ganti dari ads.readADC(2)
+
+// ===== STRUKTUR DATA EEPROM =====
+struct Config {
+  long magic;
+  int lk, rk, mid, dz;
+  int spm, sta, bel;
+  int ac, acc, man;
+  int pk, pr, zgp, dzm;
+  float vbc;
+  int stallTimeout; 
+};
+Config cfg;
+
+// ===== VARIABEL PARAMETER RAM =====
+int speedPWM, belokPWM;      
+int limitKiri, limitKanan;    
+int startDrivePWM; 
+int adcTengah, deadzone;
+int autoCenter; 
+int accelTime;  
+int manualMode; 
+int potKiri, potKanan; 
+float vbatCalib; 
+int dzMan, stirGap;
+int stallTimeout;    
+
+String currentDrive = "stop";
+String currentSteer = "lurus";
+
+// ===== VARIABEL TIMING & NON-BLOCKING =====
+unsigned long lastLimitCheck = 0;
+unsigned long lastBTCmdTime = 0; 
+
+int drivePhase = 0; 
+unsigned long driveTimer = 0;
+String pendingDrive = "";
+int currentPWM = 0;
+int activeDrivePin = 0;
+
+String pendingSteer = "lurus";
+
+// ===== VARIABEL FILTER & ZONA =====
+float smoothedRoda = 0;
+float smoothedStir = 0;
+int currentZone = 2; 
+
+// ===== VARIABEL STALL DETECTION =====
+unsigned long steerCheckTimer = 0;
+int16_t lastStirADC = 0;
+bool isSteerStalled = false;
+const int STALL_THRESHOLD = 5; // Dikecilkan karena skala ADC sekarang 0-4095 (awalnya 30)
+
+// ===== SETUP =====
+void setup() {
+    // === HACK USB BLUE PILL REVISI ===
+  pinMode(PA12, OUTPUT);
+  digitalWrite(PA12, LOW);
+  delay(100); // Tahan agak lama (100ms) biar PC beneran mutus koneksi
+  pinMode(PA12, INPUT); // BEBASKAN LAGI PINNYA
+  delay(100); // Kasih nafas sebelum USB core nyala
+  // ===================================
+  
+  Serial.begin(115200);   
+  Serial1.begin(9600);    
+
+  Serial.println("\n[SYSTEM] Memulai Proses Setup...");
+
+  pinMode(INPUT_FORWARD, INPUT_PULLUP);
+  pinMode(INPUT_BACKWARD, INPUT_PULLUP);
+
+  pinMode(RPWM_DRIVE, OUTPUT); pinMode(LPWM_DRIVE, OUTPUT);
+  pinMode(R_EN_DRIVE, OUTPUT); pinMode(L_EN_DRIVE, OUTPUT);
+  digitalWrite(R_EN_DRIVE, LOW); digitalWrite(L_EN_DRIVE, LOW);
+
+  pinMode(RPWM_STEER, OUTPUT); pinMode(LPWM_STEER, OUTPUT);
+  pinMode(R_EN_STEER, OUTPUT); pinMode(L_EN_STEER, OUTPUT);
+  digitalWrite(R_EN_STEER, LOW); digitalWrite(L_EN_STEER, LOW);
+  
+  // Pin Analog input
+  pinMode(ADC_STIR, INPUT_ANALOG);
+  pinMode(ADC_RODA, INPUT_ANALOG);
+  pinMode(ADC_VBAT, INPUT_ANALOG);
+
+  analogWriteResolution(8);
+  analogReadResolution(12); // Pastikan ADC baca di 12-bit (0-4095)
+
+  loadConfig();
+  stopAll();
+  
+  Serial.println("[SYSTEM] Setup Selesai. STM32 RC Controller Ready!");
+  Serial1.println("STM32 RC Controller Ready! (Internal ADC Mode)");
+}
+
+// ==========================================
+// ===== FUNGSI EEPROM ======================
+// ==========================================
+void loadConfig() {
+  EEPROM.get(0, cfg);
+  if (cfg.magic != 99999999) { // Magic number BARU agar reset eeprom ke nilai 12-bit
+    Serial.println("[EEPROM] Magic number tidak cocok, inisialisasi default parameter!");
+    cfg.magic = 99999999;
+    
+    // Nilai-nilai ini di-scale down menyesuaikan ADC 12-bit (0-4095)
+    cfg.lk = 450; cfg.rk = 1050; cfg.mid = 775; cfg.dz = 20;
+    cfg.spm = 80; cfg.sta = 5; cfg.bel = 150; cfg.ac = 1;
+    cfg.acc = 1500; cfg.man = 0; cfg.pk = 1548; cfg.pr = 591;
+    cfg.vbc = 0.0075; // Perlu kalibrasi ulang lewat app
+    cfg.zgp = 10; cfg.dzm = 30; // deadzone manual dikecilkan krn ADC 12-bit
+    cfg.stallTimeout = 500; 
+    EEPROM.put(0, cfg);
+  } else {
+    Serial.println("[EEPROM] Konfigurasi berhasil diload.");
+  }
+  
+  limitKiri = cfg.lk; limitKanan = cfg.rk; adcTengah = cfg.mid; deadzone = cfg.dz;
+  speedPWM = cfg.spm; startDrivePWM = cfg.sta; belokPWM = cfg.bel; autoCenter = cfg.ac;
+  accelTime = cfg.acc; manualMode = cfg.man; potKiri = cfg.pk; potKanan = cfg.pr;
+  vbatCalib = cfg.vbc; stirGap = cfg.zgp; dzMan = cfg.dzm;
+  stallTimeout = cfg.stallTimeout;
+}
+
+void saveConfig() {
+  cfg.lk = limitKiri; cfg.rk = limitKanan; cfg.mid = adcTengah; cfg.dz = deadzone;
+  cfg.spm = speedPWM; cfg.sta = startDrivePWM; cfg.bel = belokPWM; cfg.ac = autoCenter;
+  cfg.acc = accelTime; cfg.man = manualMode; cfg.pk = potKiri; cfg.pr = potKanan;
+  cfg.zgp = stirGap; cfg.dzm = dzMan; cfg.vbc = vbatCalib; cfg.stallTimeout = stallTimeout;
+  EEPROM.put(0, cfg);
+  Serial.println("[EEPROM] Settings berhasil disimpan!");
+  Serial1.println("OK:SETTINGS_SAVED");
+}
+
+// ==========================================
+// ===== FUNGSI SETIR (BTS7960) =============
+// ==========================================
+void steerTo(String arah, int pwm) {
+  if (pendingSteer != arah) {
+    Serial.print("[STEER] Command berubah -> Target: "); Serial.print(arah); 
+    Serial.print(" | PWM: "); Serial.println(pwm);
+    
+    isSteerStalled = false;
+    steerCheckTimer = millis();
+    lastStirADC = (int16_t)smoothedRoda; 
+  }
+
+  if (isSteerStalled) return; 
+
+  pendingSteer = arah;
+  digitalWrite(R_EN_STEER, HIGH);
+  digitalWrite(L_EN_STEER, HIGH);
+  
+  if (arah == "kanan") {
+    analogWrite(LPWM_STEER, 0);
+    analogWrite(RPWM_STEER, pwm); 
+  } else if (arah == "kiri") {
+    analogWrite(RPWM_STEER, 0);
+    analogWrite(LPWM_STEER, pwm); 
+  }
+}
+
+void stopSteer() {
+  if (pendingSteer != "lurus") {
+      Serial.println("[STEER] Motor Berhenti (Stop)");
+  }
+  analogWrite(RPWM_STEER, 0);
+  analogWrite(LPWM_STEER, 0);
+  digitalWrite(R_EN_STEER, LOW);
+  digitalWrite(L_EN_STEER, LOW);
+  currentSteer = "lurus"; 
+  pendingSteer = "lurus"; 
+  isSteerStalled = false; 
+}
+
+// ==========================================
+// ===== FUNGSI DRIVE (BTS7960) =============
+// ==========================================
+void stopDrive() {
+  if (currentDrive != "stop") {
+      Serial.println("[DRIVE] Motor Berhenti (Stop)");
+  }
+  analogWrite(RPWM_DRIVE, 0); analogWrite(LPWM_DRIVE, 0);
+  digitalWrite(R_EN_DRIVE, LOW); digitalWrite(L_EN_DRIVE, LOW);
+  if (drivePhase != 1) { currentDrive = "stop"; pendingDrive = ""; }
+}
+
+void executeMaju() {
+  Serial.println("[DRIVE] Mulai Akselerasi MAJU");
+  currentDrive = "maju";
+  digitalWrite(R_EN_DRIVE, HIGH); digitalWrite(L_EN_DRIVE, HIGH);
+  activeDrivePin = RPWM_DRIVE; currentPWM = startDrivePWM;
+  analogWrite(LPWM_DRIVE, 0); analogWrite(RPWM_DRIVE, currentPWM);
+  drivePhase = 2; driveTimer = millis();
+}
+
+void executeMundur() {
+  Serial.println("[DRIVE] Mulai Akselerasi MUNDUR");
+  currentDrive = "mundur";
+  digitalWrite(R_EN_DRIVE, HIGH); digitalWrite(L_EN_DRIVE, HIGH);
+  activeDrivePin = LPWM_DRIVE; currentPWM = startDrivePWM;
+  analogWrite(RPWM_DRIVE, 0); analogWrite(LPWM_DRIVE, currentPWM);
+  drivePhase = 2; driveTimer = millis();
+}
+
+void stopAll() { 
+  Serial.println("[SYSTEM] Stop All Triggered!");
+  stopDrive(); 
+  stopSteer(); 
+}
+
+// ===== LOOP =====
+void loop() {
+  handleBluetooth();
+  
+  // ========================================================
+  // BACA ADC INTERNAL STM32
+  // ========================================================
+  int16_t rawAdcRoda = analogRead(ADC_RODA);
+  // HACK: BALIK NILAI ADC RODA KARENA KABEL POTENSIO KEBALIK
+  // Range 12-bit adalah 0 - 4095
+  rawAdcRoda = 4095 - rawAdcRoda; 
+  
+  int16_t rawAdcStir = analogRead(ADC_STIR);
+
+  if (smoothedRoda == 0) smoothedRoda = rawAdcRoda;
+  if (smoothedStir == 0) smoothedStir = rawAdcStir;
+
+  smoothedRoda = (0.3 * rawAdcRoda) + (0.7 * smoothedRoda);
+  smoothedStir = (0.05 * rawAdcStir) + (0.95 * smoothedStir);
+
+  int16_t adcRoda = (int16_t)smoothedRoda;
+  int16_t adcStir = (int16_t)smoothedStir;
+  
+  bool pedalFwd = (digitalRead(INPUT_FORWARD) == LOW);
+  bool pedalBwd = (digitalRead(INPUT_BACKWARD) == LOW);
+  
+  // ========================================================
+  // LOGGER TELEMETRI KE SERIAL MONITOR PC (Setiap 1 detik)
+  // ========================================================
+  static unsigned long lastDebugLog = 0;
+  if (millis() - lastDebugLog >= 1000) {
+    lastDebugLog = millis();
+    Serial.print("[STATUS] ADC Roda: "); Serial.print(adcRoda);
+    Serial.print(" | ADC Stir: "); Serial.print(adcStir);
+    Serial.print(" | Drive: "); Serial.print(currentDrive);
+    Serial.print(" | Steer: "); Serial.println(currentSteer);
+  }
+
+  // ========================================================
+  // Timeout Safety (Gagal Sistem - Bluetooth Putus)
+  // ========================================================
+  bool btOverride = (millis() - lastBTCmdTime < 3000); 
+  if (!btOverride && currentDrive != "stop" && !pedalFwd && !pedalBwd) {
+    Serial.println("[FAILSAFE] Koneksi Bluetooth Timeout & Pedal dilepas! Menghentikan motor drive.");
+    stopDrive();
+  }
+
+  // ========================================================
+  // LIMIT CHECK
+  // ========================================================
+  if (millis() - lastLimitCheck >= 30) {
+    lastLimitCheck = millis();
+    if (currentSteer != "lurus" && currentSteer != "centering") {
+      if (pendingSteer == "kiri" && adcRoda <= limitKiri) {
+        Serial.println("[LIMIT] Mencapai Limit Kiri. Setir dihentikan.");
+        stopSteer();
+      }
+      else if (pendingSteer == "kanan" && adcRoda >= limitKanan) {
+        Serial.println("[LIMIT] Mencapai Limit Kanan. Setir dihentikan.");
+        stopSteer();
+      }
+    }
+  }
+
+  // ========================================================
+  // STALL DETECTION (Gagal Sistem - Roda Macet)
+  // ========================================================
+  if (pendingSteer != "lurus" && !isSteerStalled) {
+    if (millis() - steerCheckTimer >= stallTimeout) {
+      int pergerakan = abs(adcRoda - lastStirADC);
+      if (pergerakan < STALL_THRESHOLD) {
+        stopSteer();
+        isSteerStalled = true; 
+        Serial.println("[ERROR] STALL DETECTED! Setir macet, motor diputus untuk keamanan!");
+        Serial1.println("WARNING: STALL!"); 
+      } else {
+        steerCheckTimer = millis();
+        lastStirADC = adcRoda;
+      }
+    }
+  }
+
+  // ========================================================
+  // MANUAL CONTROL
+  // ========================================================
+  if (manualMode == 1 && !btOverride) {
+    if (pedalFwd && !pedalBwd && pendingDrive != "maju") {
+       Serial.println("[PEDAL] Ditekan MAJU");
+       stopDrive(); pendingDrive = "maju"; drivePhase = (currentDrive == "mundur") ? 1 : 0;
+       if(drivePhase==0) executeMaju(); else driveTimer=millis();
+    } else if (pedalBwd && !pedalFwd && pendingDrive != "mundur") {
+       Serial.println("[PEDAL] Ditekan MUNDUR");
+       stopDrive(); pendingDrive = "mundur"; drivePhase = (currentDrive == "maju") ? 1 : 0;
+       if(drivePhase==0) executeMundur(); else driveTimer=millis();
+    } else if (!pedalFwd && !pedalBwd && currentDrive != "stop") {
+       Serial.println("[PEDAL] Dilepas");
+       stopDrive();
+    }
+
+    int persenStir = constrain(map(adcStir, potKiri, potKanan, 0, 100), 0, 100);
+    if (persenStir < (33 - stirGap)) currentZone = 1; 
+    else if (persenStir > (33 + stirGap) && persenStir < (66 - stirGap)) currentZone = 2; 
+    else if (persenStir > (66 + stirGap)) currentZone = 3; 
+    
+    int targetADC = adcTengah;
+    if (currentZone == 1) targetADC = limitKiri;
+    else if (currentZone == 3) targetADC = limitKanan;
+
+    if (abs(adcRoda - targetADC) > dzMan) {
+      steerTo((adcRoda < targetADC) ? "kanan" : "kiri", belokPWM);
+    } else {
+      if (currentSteer != "lurus") stopSteer();
+    }
+  }
+
+  // ========================================================
+  // AUTO CENTER
+  // ========================================================
+  if (currentSteer == "centering" && (manualMode == 0 || btOverride)) {
+    int errorCenter = abs(adcRoda - adcTengah);
+    if (errorCenter <= deadzone) { 
+      Serial.println("[AUTO-CENTER] Berhasil di tengah.");
+      stopSteer(); 
+    } else {
+      int pwmBalik = belokPWM;
+      // Disesuaikan range 12-bit (500 -> 60)
+      if (errorCenter <= 60) pwmBalik = map(errorCenter, deadzone, 60, startDrivePWM, belokPWM);
+      steerTo((adcRoda < adcTengah) ? "kanan" : "kiri", pwmBalik);
+    }
+  }
+
+  // ========================================================
+  // DRIVE STATE MACHINE (Akselerasi)
+  // ========================================================
+  if (drivePhase == 1 && millis() - driveTimer >= 300) {
+    if (pendingDrive == "maju") executeMaju();
+    else if (pendingDrive == "mundur") executeMundur();
+  }
+  else if (drivePhase == 2) {
+    unsigned long elapsed = millis() - driveTimer;
+    if (elapsed >= accelTime) {
+      currentPWM = speedPWM;
+      drivePhase = 0; 
+      Serial.println("[DRIVE] Akselerasi Selesai -> Max Speed");
+    } else {
+      currentPWM = startDrivePWM + ((speedPWM - startDrivePWM) * elapsed / accelTime);
+    }
+    analogWrite(activeDrivePin, currentPWM);
+  }
+}
+
+// ==========================================
+// ===== HANDLER BLUETOOTH ==================
+// ==========================================
+void handleBluetooth() {
+  if (Serial1.available()) {
+    String cmd = Serial1.readStringUntil('\n');
+    cmd.trim(); 
+    if (cmd.length() == 0) return;
+    
+    lastBTCmdTime = millis(); 
+    Serial.print("[BLUETOOTH] Command Masuk: "); Serial.println(cmd);
+    
+    if (cmd == "ping") { /* Reset timer aja */ }
+    else if (cmd == "telemetry") {
+      float vbat = analogRead(ADC_VBAT) * vbatCalib; // Baca Vbat via internal
+      String json = "{\"vbat\":" + String(vbat, 2) + ",\"roda\":" + String((int16_t)smoothedRoda) + ",\"stir\":" + String((int16_t)smoothedStir) + "}";
+      Serial1.println(json);
+    }
+    else if (cmd == "get_params") {
+      String json = "{\"lk\":" + String(limitKiri) + ",\"rk\":" + String(limitKanan) + ",\"mid\":" + String(adcTengah) + ",\"dz\":" + String(deadzone) + ",\"spm\":" + String(speedPWM) + ",\"sta\":" + String(startDrivePWM) + ",\"bel\":" + String(belokPWM) + ",\"ac\":" + String(autoCenter) + ",\"acc\":" + String(accelTime) + ",\"man\":" + String(manualMode) + ",\"pk\":" + String(potKiri) + ",\"pr\":" + String(potKanan) + ",\"zgp\":" + String(stirGap) + ",\"dzm\":" + String(dzMan) + ",\"stt\":" + String(stallTimeout) + "}";
+      Serial1.println(json);
+    }
+    else if (cmd.startsWith("set_params:")) {
+      String params = cmd.substring(11) + ","; 
+      int pos = 0;
+      while ((pos = params.indexOf(',')) != -1) {
+        String token = params.substring(0, pos);
+        int eqIndex = token.indexOf('=');
+        if (eqIndex != -1) {
+          String key = token.substring(0, eqIndex);
+          int val = token.substring(eqIndex + 1).toInt();
+          
+          if (key == "lk") limitKiri = val;
+          else if (key == "rk") limitKanan = val;
+          else if (key == "mid") adcTengah = val;
+          else if (key == "dz") deadzone = val;
+          else if (key == "spm") speedPWM = val;
+          else if (key == "sta") startDrivePWM = val;
+          else if (key == "bel") belokPWM = val;
+          else if (key == "ac") autoCenter = val;
+          else if (key == "acc") accelTime = val;
+          else if (key == "man") manualMode = val;
+          else if (key == "pk") potKiri = val;
+          else if (key == "pr") potKanan = val;
+          else if (key == "zgp") stirGap = val;
+          else if (key == "dzm") dzMan = val;
+          else if (key == "stt") stallTimeout = val; 
+        }
+        params = params.substring(pos + 1);
+      }
+      saveConfig();
+    }
+    else if (cmd.startsWith("cal_vbat:")) {
+      float actualV = cmd.substring(9).toFloat();
+      int16_t rawAdc = analogRead(ADC_VBAT);
+      if (rawAdc > 0) {
+        vbatCalib = actualV / rawAdc;
+        saveConfig();
+      }
+    }
+    else if (cmd == "maju") { 
+      if (pendingDrive != "maju") { stopDrive(); pendingDrive = "maju"; drivePhase = (currentDrive == "mundur") ? 1 : 0; if(drivePhase==0) executeMaju(); else driveTimer=millis(); }
+    }
+    else if (cmd == "mundur") { 
+      if (pendingDrive != "mundur") { stopDrive(); pendingDrive = "mundur"; drivePhase = (currentDrive == "maju") ? 1 : 0; if(drivePhase==0) executeMundur(); else driveTimer=millis(); }
+    }
+    else if (cmd == "release_drive") {
+      Serial.println("[BLUETOOTH] Perintah release drive diterima.");
+      stopDrive();
+    }
+    else if (cmd == "kiri") { 
+      if(smoothedRoda > limitKiri) { currentSteer = "manual"; steerTo("kiri", belokPWM); } 
+      else { Serial.println("[LIMIT] Command Kiri diabaikan, sudah di limit"); }
+    }
+    else if (cmd == "kanan") { 
+      if(smoothedRoda < limitKanan) { currentSteer = "manual"; steerTo("kanan", belokPWM); } 
+      else { Serial.println("[LIMIT] Command Kanan diabaikan, sudah di limit"); }
+    }
+    else if (cmd == "release_steer") {
+      Serial.println("[BLUETOOTH] Perintah release steer diterima.");
+      if (autoCenter == 1) currentSteer = "centering"; 
+      else stopSteer(); 
+    }
+  }
+}
